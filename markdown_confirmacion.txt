@@ -1,0 +1,228 @@
+========================================================
+SISTEMA DE CONFIRMACIÓN (WhatsApp + Google Sheets)
+Guía para replicar en futuras invitaciones
+========================================================
+
+FUNCIONAMIENTO
+--------------
+Al tocar "Confirmar asistencia" pasan 2 cosas:
+  1. Se abre WhatsApp con el mensaje armado.
+  2. Detrás de cámara se guarda la fila en Google Sheets (fetch POST).
+
+Además hay un iconito de persona en la sección Confirmación que,
+con una contraseña, abre la planilla en una pestaña nueva.
+
+
+--------------------------------------------------------
+PARTE 1 - APPS SCRIPT (backend)
+--------------------------------------------------------
+
+1. Abrir la planilla y crear el script desde ella:
+   Planilla > Extensiones > Apps Script
+   (así el script y la planilla quedan con la MISMA cuenta de Google).
+
+2. Borrar todo y pegar este código completo:
+
+const HOJA_ID = "PEGAR_ACA_EL_ID_DE_LA_PLANILLA";
+
+function obtenerLibro() {
+  let libro = null;
+  try {
+    libro = SpreadsheetApp.getActiveSpreadsheet();
+  } catch (err) {
+    libro = null;
+  }
+  if (!libro) {
+    libro = SpreadsheetApp.openById(HOJA_ID);
+  }
+  return libro;
+}
+
+function obtenerHoja() {
+  return obtenerLibro().getSheets()[0];
+}
+
+function doPost(e) {
+  if (!e || !e.postData) {
+    return ContentService.createTextOutput("Sin datos");
+  }
+  const datos = JSON.parse(e.postData.contents);
+  const hoja = obtenerHoja();
+  if (hoja.getLastRow() === 0) {
+    hoja.appendRow(["Fecha de confirmación", "Nombre y apellido", "Asistencia", "Mensaje"]);
+  }
+  const lista = Array.isArray(datos.invitados) ? datos.invitados : [datos];
+  lista.forEach(function (invitado) {
+    hoja.appendRow([
+      new Date(),
+      invitado.nombre || "",
+      invitado.asistencia || "",
+      invitado.mensaje || ""
+    ]);
+  });
+  return ContentService.createTextOutput("OK");
+}
+
+function doGet(e) {
+  const libro = obtenerLibro();
+  if (e && e.parameter && e.parameter.abrir === "1") {
+    const url = libro.getUrl();
+    const html = '<html><head><meta http-equiv="refresh" content="0;url=' + url + '">' +
+      '<script>location.replace(' + JSON.stringify(url) + ');</script></head>' +
+      '<body>Abriendo la planilla...</body></html>';
+    return ContentService.createTextOutput(html).setMimeType(ContentService.MimeType.HTML);
+  }
+  const hoja = libro.getSheets()[0];
+  if (hoja.getLastRow() === 0) {
+    return ContentService.createTextOutput("[]").setMimeType(ContentService.MimeType.JSON);
+  }
+  return ContentService.createTextOutput(JSON.stringify(hoja.getDataRange().getValues()))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function probar() {
+  doPost({
+    postData: {
+      contents: JSON.stringify({
+        invitados: [{ nombre: 'PRUEBA', asistencia: 'SI', mensaje: 'test' }]
+      })
+    }
+  });
+}
+
+3. El ID de la planilla (HOJA_ID) se saca de la barra de direcciones:
+   https://docs.google.com/spreadsheets/d/[ESTE_TROZO]/edit
+   Copiarlo con Ctrl+C (NO escribirlo a mano: es sensible a
+   mayúsculas/minúsculas; un solo carácter mal rompe todo).
+
+4. Guardar (Ctrl+S).
+
+5. Probar el guardado ANTES de publicar:
+   - En el desplegable de funciones elegir "probar" > Ejecutar.
+   - Debe aparecer la fila PRUEBA en la planilla.
+   - Borrar la fila PRUEBA después.
+
+6. Publicar:
+   Implementar > Nueva implementación > Aplicación web
+     - Ejecutar como: Yo
+     - Quién puede acceder: Cualquier persona   <-- OBLIGATORIO
+   Copiar la URL que termina en /exec.
+
+7. CADA VEZ que se toque el código:
+   Implementar > Administrar implementaciones > lápiz >
+   Versión: "Nueva versión" > Implementar. La URL /exec NO cambia.
+
+
+--------------------------------------------------------
+PARTE 2 - FRONTEND (invitación)
+--------------------------------------------------------
+
+1. En javascript/script.js, estas 3 constantes (arriba del handler):
+
+const SHEET_URL = 'https://script.google.com/macros/s/XXXX/exec';
+const SHEET_LINK = 'https://docs.google.com/spreadsheets/d/YYYY/edit?gid=0#gid=0';
+const CLAVE_DESCARGA = 'tu-contraseña';
+
+   REGLA DE ORO (la que más errores causó):
+   - SHEET_URL = SIEMPRE la URL /exec del Apps Script.
+     Es la que usa el fetch POST para GUARDAR.
+     NUNCA poner acá la URL de la planilla (docs.google.com).
+   - SHEET_LINK = la URL de la planilla (docs.google.com/...).
+     Es la que abre el icono. Copiarla del navegador, no escribirla.
+   - CLAVE_DESCARGA = la contraseña que pide el icono.
+
+2. Envío silencioso (dentro de sendMessage, después de window.open):
+
+    fetch(SHEET_URL, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({
+        invitados: [{
+          nombre: userName,
+          asistencia: attendanceStatus.value,
+          mensaje: userMessage ? userMessage : ''
+        }]
+      })
+    }).catch(function () {});
+
+   NOTA TÉCNICA: se usa mode no-cors + text/plain porque Apps Script
+   no devuelve cabeceras CORS. El navegador envía igual y no lee la
+   respuesta ("fire and forget"). Si falla, el .catch lo ignora y
+   WhatsApp igual se abre.
+
+3. Icono de persona en la sección .confirmacion (HTML, discreto):
+
+<button type="button" id="descargarLista" title="Descargar lista de invitados"
+  aria-label="Descargar lista de invitados"
+  style="position:relative;z-index:10;pointer-events:auto;background:none;
+  border:none;cursor:pointer;font-size:1.3rem;opacity:0.55;float:right;
+  line-height:1;"><i class="fas fa-user"></i></button>
+
+   Requiere Font Awesome cargado en el <head>.
+   El position:relative + z-index:10 evita que el título lo tape
+   (sin eso no cambia ni el cursor).
+
+4. Handler del icono (en script.js):
+
+document.getElementById('descargarLista').addEventListener('click', function () {
+  const clave = prompt('Ingresá la contraseña para ver la lista:');
+  if (clave === null) return;
+  if (clave !== CLAVE_DESCARGA) {
+    alert('Contraseña incorrecta.');
+    return;
+  }
+  window.open(SHEET_LINK, '_blank');
+});
+
+   Seguridad: baja a propósito (la clave vive en el JS visible).
+   Para una invitación familiar es aceptable.
+
+
+--------------------------------------------------------
+PARTE 3 - CHECKLIST POR INVITACIÓN NUEVA
+--------------------------------------------------------
+
+[ ] Crear la planilla nueva.
+[ ] Copiar el ID (de la barra, con Ctrl+C) y pegarlo en HOJA_ID.
+[ ] Crear el script desde la planilla (Extensiones > Apps Script).
+[ ] Pegar el código completo y guardar.
+[ ] Ejecutar "probar" y verificar la fila PRUEBA. Borrarla.
+[ ] Implementar como aplicación web (Yo + Cualquier persona).
+[ ] Copiar la URL /exec.
+[ ] En script.js: SHEET_URL (/exec), SHEET_LINK (planilla),
+    CLAVE_DESCARGA (nueva contraseña).
+[ ] Si se edita el .gs: publicar NUEVA VERSIÓN.
+[ ] Probar una confirmación real y ver la fila en la planilla.
+[ ] Probar el icono con la contraseña.
+
+
+--------------------------------------------------------
+PARTE 4 - ERRORES FRECUENTES (todos pasaron en el proyecto Mili)
+--------------------------------------------------------
+
+- "Document ... is missing (perhaps deleted, or no read access?)":
+  El script corre con otra cuenta distinta a la dueña de la planilla,
+  o el HOJA_ID está mal copiado. Crear el script desde la planilla
+  y/o verificar el ID carácter por carácter.
+
+- "Cannot read properties of undefined (reading 'postData')":
+  Se ejecutó doPost() a mano desde el editor. doPost necesita el
+  objeto 'e' de un POST real. Para probar usar la función "probar".
+
+- El POST no guarda pero WhatsApp sí abre:
+  1) Verificar que SHEET_URL sea la /exec (NO la de docs.google).
+  2) Verificar acceso "Cualquier persona".
+  3) Verificar que se publicó "Nueva versión" después del último cambio.
+  4) Mirar Apps Script > Ejecuciones para ver el error real.
+
+- El icono no hace nada (ni cambia el cursor):
+  1) Le falta position:relative + z-index (el título lo tapa).
+  2) El script.js que corre es viejo (caché/service worker):
+     Ctrl+Shift+R, o abrir en incógnito para comparar.
+
+- Abrir la /exec en el navegador:
+  - Muestra [] o JSON  -> el deploy anda.
+  - Pide login / 401   -> el acceso NO está en "Cualquier persona".
+  - "Script function not found: doGet" -> falta publicar nueva versión.
+========================================================
